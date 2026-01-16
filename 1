@@ -1,0 +1,1215 @@
+# NextoSwitchPluginV2.1.0.py
+import time
+import os
+import sys
+import numpy as np
+import traceback
+import math
+
+# Function to install dependencies from requirements.txt
+def install_dependencies():
+    try:
+        import subprocess
+        import sys
+        import os
+        
+        # Define required packages directly in the plugin
+        required_packages = [
+            "numpy>=1.19.0",
+            "rlbot>=1.0.0",
+            "torch>=1.7.0",
+            "rlgym-compat>=1.0.0",
+            "scipy>=1.5.0",
+            "matplotlib>=3.3.0",
+            "pandas>=1.0.0"
+        ]
+        
+        # Get the plugin directory for batch file location
+        plugin_dir = os.path.dirname(os.path.realpath(__file__))
+        batch_file_path = os.path.join(plugin_dir, "install_nexto_dependencies.bat")
+        
+        print("\033[93m" + "=" * 80)
+        print("Creating installation batch file...")
+        
+        # Create batch file content
+        batch_content = "@echo off\n"
+        batch_content += "echo ===================================================================\n"
+        batch_content += "echo Installing Nexto dependencies...\n"
+        batch_content += "echo ===================================================================\n\n"
+        
+        # Add commands to install each package
+        batch_content += "echo Installing numpy...\n"
+        batch_content += "pip install numpy>=1.19.0\n\n"
+        
+        batch_content += "echo Installing rlgym-compat...\n"
+        batch_content += "pip install rlgym-compat>=1.0.0\n\n"
+        
+        batch_content += "echo Installing PyTorch...\n"
+        batch_content += "pip install torch>=1.7.0 --find-links https://download.pytorch.org/whl/torch_stable.html\n\n"
+        
+        batch_content += "echo Installing additional packages...\n"
+        batch_content += "pip install scipy>=1.5.0 matplotlib>=3.3.0 pandas>=1.0.0\n\n"
+        
+        batch_content += "echo ===================================================================\n"
+        batch_content += "echo Installation complete!\n"
+        batch_content += "echo Please restart the application to use NextoSwitchPlugin.\n"
+        batch_content += "echo ===================================================================\n"
+        batch_content += "pause\n"
+        
+        # Write the batch file
+        with open(batch_file_path, "w") as f:
+            f.write(batch_content)
+            
+        print(f"Created batch file at: {batch_file_path}")
+        
+        # Run the batch file
+        print("Running installation batch file...")
+        print("\033[91m" + "=" * 80)
+        print("IMPORTANT: After the installation completes, RESTART the application to use NextoSwitchPlugin!")
+        print("=" * 80 + "\033[0m")
+        
+        # Use subprocess to run the batch file externally with cmd /k
+        try:
+            # Use os.system with cmd /k to keep the window open
+            os.system(f'start cmd /k "{batch_file_path}"')
+            
+        except Exception as run_error:
+            print(f"Error running batch file: {run_error}")
+            print(f"Please run the batch file manually: {batch_file_path}")
+        
+        # Skip any further installation attempts
+        print("\033[92m" + "=" * 80)
+        print("Batch file created to install dependencies. Please run it and restart the application.")
+        print("\033[91m" + "IMPORTANT: You need to RESTART the script to use NextoSwitchPlugin!" + "\033[0m")
+        print("=" * 80 + "\033[0m")
+        return False
+    
+    except Exception as e:
+        print("\033[91m" + "=" * 80)
+        print(f"Error creating batch file: {e}")
+        print("Please manually install the required packages:")
+        print("- numpy>=1.19.0")
+        print("- rlbot>=1.0.0")
+        print("- torch>=1.7.0 (with --find-links https://download.pytorch.org/whl/torch_stable.html)")
+        print("- rlgym-compat>=1.0.0")
+        print("- scipy>=1.5.0")
+        print("- matplotlib>=3.3.0")
+        print("- pandas>=1.0.0")
+        print("\033[91m" + "IMPORTANT: You need to RESTART the script after installing dependencies!" + "\033[0m")
+        print("=" * 80 + "\033[0m")
+        return False
+
+# Attempt to make Nexto code importable
+_PLUGIN_DIR = os.path.dirname(os.path.realpath(__file__))
+_NEXTO_CORE_DIR = os.path.join(_PLUGIN_DIR, "nexto_core")
+
+# Add both the plugin directory and nexto_core directory to path
+if _PLUGIN_DIR not in sys.path:
+    sys.path.insert(0, _PLUGIN_DIR)
+if _NEXTO_CORE_DIR not in sys.path:
+    sys.path.insert(0, _NEXTO_CORE_DIR)
+
+# This import is from rlbot.agents.base_agent, which script_old (1).py also uses.
+try:
+    from rlbot.agents.base_agent import SimpleControllerState
+except ImportError:
+    class SimpleControllerState:
+        def __init__(self, steer=0.0, throttle=0.0, pitch=0.0, yaw=0.0, roll=0.0, jump=False, boost=False, handbrake=False, use_item=False):
+            self.steer, self.throttle, self.pitch, self.yaw, self.roll = steer, throttle, pitch, yaw, roll
+            self.jump, self.boost, self.handbrake, self.use_item = jump, boost, handbrake, use_item
+        def __str__(self): return f"SCS(T:{self.throttle:.1f} S:{self.steer:.1f} P:{self.pitch:.1f} J:{self.jump})"
+
+class DummyVec3: # Used by AdaptiveFieldInfo for field data representation
+    def __init__(self, x, y, z):
+        self.x = float(x)
+        self.y = float(y)
+        self.z = float(z)
+
+class DummyGoalInfo: # Used by AdaptiveFieldInfo for goal data representation
+    def __init__(self, team_num, location_vec3, width=1786.0, height=642.0, depth=880.0):
+        self.team_num = int(team_num)
+        self.location = location_vec3 # Should be a DummyVec3 instance
+        self.width = float(width)
+        self.height = float(height)
+        self.depth = float(depth) # Standard RLBot FieldInfo might not have depth, Nexto might use it.
+
+class DummyBoostPad: # Used by AdaptiveFieldInfo for boost pad representation
+    def __init__(self, location_vec3, is_full_boost):
+        self.location = location_vec3 # Should be a DummyVec3 instance
+        self.is_full_boost = bool(is_full_boost)
+
+class AdaptiveFieldInfo:
+    """A field info class that provides what Nexto needs, adapting live game data if available."""
+    def __init__(self, live_field_info_packet=None):
+        self.live_field_info_packet = live_field_info_packet
+        self.num_boosts = 0 # Will be updated
+        self.boost_pads = [] # List of DummyBoostPad objects
+        self._boost_locations = np.empty((0, 3), dtype=np.float32) # Raw locations for Nexto's format, initialized as 2D
+        
+        self.goals = [] # List of DummyGoalInfo objects
+        
+        self._setup_boost_pads()
+        self._setup_goals()
+        
+    def _setup_goals(self):
+        if self.live_field_info_packet and self.live_field_info_packet.num_goals > 0:
+            for i in range(self.live_field_info_packet.num_goals):
+                live_goal = self.live_field_info_packet.goals[i]
+                loc = DummyVec3(live_goal.location.x, live_goal.location.y, live_goal.location.z)
+                # Note: live_goal.direction might be useful for Nexto, but DummyGoalInfo doesn't store it.
+                # Standard RLBot FieldInfo also might not have goal depth, so we use default.
+                self.goals.append(DummyGoalInfo(live_goal.team_num, loc, live_goal.width, live_goal.height))
+        else:
+            # Fallback to standard goal locations
+            blue_goal_loc = DummyVec3(0, -5120, 321.3875)
+            self.goals.append(DummyGoalInfo(0, blue_goal_loc))
+            orange_goal_loc = DummyVec3(0, 5120, 321.3875)
+            self.goals.append(DummyGoalInfo(1, orange_goal_loc))
+            
+    def _setup_boost_pads(self):
+        standard_pads_tuples = [ # Keep this for fallback
+            (3584, 4096, 73), (-3584, 4096, 73), (3584, -4096, 73), (-3584, -4096, 73),
+            (0, 4240, 73), (0, -4240, 73), (3072, 0, 73), (-3072, 0, 73),
+            (0, -2816, 73), (0, -1024, 73), (0, 0, 73), (0, 1024, 73), (0, 2816, 73),
+            (-1792, -4184, 73), (1792, -4184, 73), (-1792, 4184, 73), (1792, 4184, 73),
+            (-3584, -2484, 73), (3584, -2484, 73), (-3584, 2484, 73), (3584, 2484, 73),
+            (-2048, -3072, 73), (2048, -3072, 73), (-2048, 3072, 73), (2048, 3072, 73),
+            (-940, -1036, 73), (940, -1036, 73), (-940, 1036, 73), (940, 1036, 73),
+            (-2048, -1036, 73), (2048, -1036, 73), (-2048, 1036, 73), (2048, 1036, 73),
+            (-1024, -4240, 73)
+        ]
+
+        raw_locations_list = []
+        if self.live_field_info_packet and self.live_field_info_packet.num_boosts > 0:
+            self.num_boosts = self.live_field_info_packet.num_boosts
+            for i in range(self.live_field_info_packet.num_boosts):
+                live_pad = self.live_field_info_packet.boost_pads[i]
+                loc = DummyVec3(live_pad.location.x, live_pad.location.y, live_pad.location.z)
+                is_full = live_pad.is_full_boost
+                self.boost_pads.append(DummyBoostPad(loc, is_full))
+                raw_locations_list.append((loc.x, loc.y, loc.z))
+        else:
+            # Fallback to standard boost pad locations
+            self.num_boosts = len(standard_pads_tuples)
+            for x, y, z in standard_pads_tuples:
+                loc = DummyVec3(x, y, z)
+                is_full = abs(x) >= 3072 or (x == 0 and abs(y) >= 4096) # Approximation for full boosts
+                self.boost_pads.append(DummyBoostPad(loc, is_full))
+                raw_locations_list.append((x, y, z))
+        
+        # Ensure _boost_locations is populated correctly for the property
+        if raw_locations_list:
+            self._boost_locations = np.array(raw_locations_list, dtype=np.float32)
+        else: # Should not happen if fallback works, but as a safe guard
+            self._boost_locations = np.empty((0,3), dtype=np.float32)
+
+
+    @property
+    def boost_locations(self):
+        """Return boost locations in the shape Nexto expects: (2,1,N,3) where N is num_boosts"""
+        # Reshape the locations to match the expected shape
+        # Nexto might expect exactly 34, but using self.num_boosts is more robust if live data has different counts.
+        # However, Nexto's internal model is likely trained on 34. We might need to pad or truncate if num_boosts differs.
+        # For now, assume Nexto can handle variable N or that N will be 34 from live data on standard maps.
+        # If Nexto strictly requires 34, padding/truncation logic would be needed here.
+        # Let's assume self.num_boosts is the correct N for now.
+        
+        # Ensure _boost_locations has data
+        if self._boost_locations.size == 0:
+             # Return a correctly shaped empty array or handle error
+             # This indicates an issue in _setup_boost_pads if it happens
+            return np.zeros((2, 1, 0, 3), dtype=np.float32)
+
+        # Pad or truncate to 34 if Nexto requires it
+        # This is a common requirement for fixed-size NN inputs.
+        target_num_pads = 34 
+        current_num_pads = self._boost_locations.shape[0]
+        
+        if current_num_pads == target_num_pads:
+            processed_locations = self._boost_locations
+        elif current_num_pads > target_num_pads:
+            processed_locations = self._boost_locations[:target_num_pads, :]
+        else: # current_num_pads < target_num_pads
+            padding = np.zeros((target_num_pads - current_num_pads, 3), dtype=np.float32)
+            processed_locations = np.vstack((self._boost_locations, padding))
+
+        reshaped = np.zeros((2, 1, target_num_pads, 3), dtype=np.float32)
+        reshaped[0, 0, :target_num_pads] = processed_locations
+        reshaped[1, 0, :target_num_pads] = processed_locations # Both teams see same pads
+        return reshaped
+        
+    @property
+    def field_size(self):
+        """Return standard field dimensions. Not typically in FieldInfoPacket."""
+        return (8192, 10240, 2044)  # Width (x), Length (y), Height (z)
+
+class NextoSwitchPlugin:
+    def __init__(self, ConsoleLogger=print):
+        self.logger = ConsoleLogger
+        self.Name = lambda: "NextoSwitchPlugin"
+
+        self.nexto_instance = None
+        self.nexto_agent_active = False
+        self._nexto_initialized_for_player_key = None
+        
+        self.live_field_info = None # Will store the raw FieldInfoPacket from game_tick_packet_set
+        self.field_info = None      # Will store the Nexto-compatible version (instance of AdaptiveFieldInfo)
+        
+        self.dribble_stop_timestamp = 0
+        self.dribble_cooldown_duration = 0.8
+        
+        # State tracking for activation reason and dribble detection
+        self.activated_for_dribble = False
+        self.last_activation_reason = ""
+        
+        # ANSI color codes for better visibility in console
+        self.BOLD = "\033[1m"
+        self.GREEN = "\033[92m"
+        self.RED = "\033[91m"
+        self.YELLOW = "\033[93m"
+        self.BLUE = "\033[94m"
+        self.RESET = "\033[0m"
+        
+        # Dribble detection timer variables
+        self.opponent_dribble_start_time = 0
+        self.our_dribble_start_time = 0
+        self.teammate_dribble_start_time = 0
+        self.opponent_was_dribbling = False
+        self.we_were_dribbling = False
+        self.teammate_was_dribbling = False
+        self.dribble_confirmation_time = 0.05
+
+        # Challenge detection parameters
+        self.challenge_prediction_time = 0.5
+        self.early_challenge_distance = 2000
+        self.close_challenge_distance = 1400
+        self.very_close_challenge_distance = 800
+        
+        # Dribble detection parameters
+        self.config_min_ball_height_above_car = 30.0
+        self.config_max_ball_height_above_car = 220.0
+        self.config_max_horizontal_offset = 160.0
+        self.config_max_relative_speed_for_dribble = 350.0
+        self.config_max_car_height = 100.0
+
+        # Try to import Nexto
+        self.NextoBotClass = None
+        try:
+            try:
+                from nexto_core.bot import Nexto as NextoBotClass
+            except ImportError as e:
+                self.logger(f"[{self.Name()}] Failed to import Nexto: {e}")
+                if install_dependencies():
+                    self.logger(f"[{self.Name()}] Dependencies installed. Please restart the script to use NextoSwitchPlugin.")
+                    self.logger("\033[91m" + "=" * 80)
+                    self.logger("IMPORTANT: You need to RESTART the script to use NextoSwitchPlugin!")
+                    self.logger("=" * 80 + "\033[0m")
+                
+                import importlib.util
+                bot_path = os.path.join(_NEXTO_CORE_DIR, "bot.py")
+                if os.path.exists(bot_path):
+                    try:
+                        spec = importlib.util.spec_from_file_location("bot", bot_path)
+                        bot_module = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(bot_module)
+                        NextoBotClass = bot_module.Nexto
+                    except ImportError as direct_import_error:
+                        self.logger(f"[{self.Name()}] Failed to directly import Nexto: {direct_import_error}")
+                        if install_dependencies():
+                            self.logger(f"[{self.Name()}] Dependencies installed. Please restart the script to use NextoSwitchPlugin.")
+                            self.logger("\033[91m" + "=" * 80)
+                            self.logger("IMPORTANT: You need to RESTART the script to use NextoSwitchPlugin!")
+                            self.logger("=" * 80 + "\033[0m")
+                else:
+                    raise ImportError(f"bot.py not found at {bot_path}")
+            
+            self.NextoBotClass = NextoBotClass
+        except Exception as e:
+            self.logger(f"[{self.Name()}] Failed to import NextoBotClass: {e}")
+            self.logger(traceback.format_exc())
+
+        self.current_player_index = -1
+        self.current_player_team = -1
+        
+    def _is_on_lower_side_wall(self, car):
+        """Detect if car is on the lower X% of a SIDE wall only (ignore backwall)."""
+        car_pos = np.array([car.physics.location.x, car.physics.location.y, car.physics.location.z])
+        rot = car.physics.rotation
+
+        # Seulement les murs latéraux
+        near_side_wall = abs(car_pos[0]) > 3800
+        if not near_side_wall:
+            return False
+
+        # ⚙️ Paramètres configurables
+        FIELD_WALL_HEIGHT = 2044       # hauteur approx. max d’un mur latéral
+        SPARK_WALL_RATIO = 0.3         # Spark actif seulement sur les 40% du bas
+
+        max_wall_height_spark = FIELD_WALL_HEIGHT * SPARK_WALL_RATIO
+
+        # Limite de hauteur
+        if car_pos[2] > max_wall_height_spark:
+            return False
+
+        # Orientation check: roll ≈ ±90° quand collé au mur latéral
+        roll_deg = math.degrees(rot.roll)
+        return abs(roll_deg) > 45
+
+
+
+    
+
+    def _should_use_spark(self, packet, local_player_index, local_player_team):
+        """Détermine si on utilise Spark uniquement dans certaines zones (kickoff + 1.5s, murs bas, défense sauf si ennemi dribble)."""
+        if local_player_index >= packet.num_cars:
+            return False
+
+        current_time = packet.game_info.seconds_elapsed  # temps du jeu
+        
+        our_car = packet.game_cars[local_player_index]
+        car_pos = np.array([our_car.physics.location.x, our_car.physics.location.y, our_car.physics.location.z])
+        
+        # Dimensions du terrain
+        field_length = 10240
+        field_half = field_length / 2
+
+        # 🚗 SPARK POUR LES KICKOFFS 🚗
+        if self._is_kickoff(packet):
+            # On note la fin du cooldown de kickoff
+            self.kickoff_cooldown_until = current_time + 1.5
+            self.logger(f"[{self.Name()}] {self.RED}{self.BOLD}SPARK POUR KICKOFF!{self.RESET}")
+            return True
+
+        # ⏳ Cooldown après kickoff (1.5s)
+        if hasattr(self, "kickoff_cooldown_until") and current_time < self.kickoff_cooldown_until:
+            self.logger(f"[{self.Name()}] {self.YELLOW}{self.BOLD}COOLDOWN post-kickoff Spark ({self.kickoff_cooldown_until - current_time:.1f}s restants){self.RESET}")
+            return True
+
+        # 🧱 Spark quand Nexto est SUR la partie basse d’un mur latéral 🧱
+        if self._is_on_lower_side_wall(our_car):
+            self.logger(f"[{self.Name()}] {self.BLUE}{self.BOLD}SPARK SUR MUR LATÉRAL BAS!{self.RESET} "
+                        f"Pos=({car_pos[0]:.0f},{car_pos[1]:.0f},{car_pos[2]:.0f})")
+            return True
+
+        # 🛡️ Zone défensive uniquement (Spark actif sauf si ennemi dribble)
+        if local_player_team == 0:  # Équipe bleue
+            defensive_zone = car_pos[1] < -field_half * 0.68
+        else:  # Équipe orange
+            defensive_zone = car_pos[1] > field_half * 0.68
+
+        if defensive_zone:
+            if self._is_opponent_dribbling(packet, local_player_team):
+                self.logger(f"[{self.Name()}] {self.YELLOW}{self.BOLD}NEXT0 EN DEFENSE: ennemi dribble détecté → Spark désactivé{self.RESET}")
+                return False  # Nexto reste actif
+            return True  # Spark en défense si pas de dribble adverse
+
+        return False
+
+
+
+
+    def _initialize_nexto_if_needed(self, packet, local_player_index, player_team):
+        if local_player_index < 0 or local_player_index >= packet.num_cars:
+            self.logger(f"[{self.Name()}] Invalid local_player_index: {local_player_index}. Cannot initialize Nexto.")
+            return False
+        
+        if not self.NextoBotClass:
+            if not hasattr(self, "_nexto_import_failed_logged_init"):
+                self.logger(f"[{self.Name()}] NextoBotClass not available, cannot initialize Nexto.")
+                self._nexto_import_failed_logged_init = True
+            return False
+        
+        current_key = (local_player_index, player_team)
+        if self.nexto_instance and self._nexto_initialized_for_player_key == current_key:
+            return True
+
+        try:
+            player_name = "NextoPluginInstance"
+            if local_player_index < len(packet.game_cars):
+                if hasattr(packet.game_cars[local_player_index], 'name'):
+                     player_name = packet.game_cars[local_player_index].name
+            
+            self.nexto_instance = self.NextoBotClass(
+                name=player_name,
+                team=player_team,
+                index=local_player_index,
+                beta=1, 
+                render=False,
+                hardcoded_kickoffs=True,
+                stochastic_kickoffs=False
+            )
+            
+            current_live_field_info = self.live_field_info if hasattr(self, 'live_field_info') else None
+            self.field_info = AdaptiveFieldInfo(live_field_info_packet=current_live_field_info)
+            
+            self.nexto_instance.initialize_agent(self.field_info)
+            self.nexto_instance.tick_skip = 8
+            
+            if hasattr(self.nexto_instance, 'obs_builder') and self.nexto_instance.obs_builder is not None:
+                if hasattr(self.nexto_instance.obs_builder, '_reset') and hasattr(self.nexto_instance, 'game_state'):
+                    try:
+                        self.nexto_instance.obs_builder._reset(self.nexto_instance.game_state)
+                    except Exception as e:
+                        self.logger(f"[{self.Name()}] Warning: Could not reset obs_builder: {e}")
+            
+            if hasattr(self.nexto_instance, 'team_sign'):
+                self.nexto_instance.team_sign = 1 if player_team == 0 else -1
+            
+            self._nexto_initialized_for_player_key = current_key
+            self.logger(f"[{self.Name()}] {self.GREEN}{self.BOLD}Nexto initialized{self.RESET} for player {player_name} (idx: {local_player_index}, team: {player_team})")
+            return True
+
+        except Exception as e:
+            self.logger(f"[{self.Name()}] Error during Nexto initialization: {e}")
+            self.logger(traceback.format_exc())
+            self.nexto_instance = None
+            self._nexto_initialized_for_player_key = None
+            return False
+
+    def _is_opponent_dribbling(self, packet, local_player_team: int) -> bool:
+        if not hasattr(packet, 'game_ball') or not hasattr(packet.game_ball, 'physics'):
+            return False
+
+        ball_phys = packet.game_ball.physics
+        ball_loc = np.array([ball_phys.location.x, ball_phys.location.y, ball_phys.location.z])
+        ball_vel = np.array([ball_phys.velocity.x, ball_phys.velocity.y, ball_phys.velocity.z])
+        
+        local_player_index = -1
+        our_car_pos = None
+        for i in range(packet.num_cars):
+            if packet.game_cars[i].team == local_player_team:
+                our_car_pos = np.array([
+                    packet.game_cars[i].physics.location.x,
+                    packet.game_cars[i].physics.location.y,
+                    packet.game_cars[i].physics.location.z
+                ])
+                break
+        
+        if our_car_pos is None:
+            return False
+
+        for i in range(packet.num_cars):
+            player = packet.game_cars[i]
+            if player.team == local_player_team or player.is_demolished:
+                continue
+
+            car_phys = player.physics
+            car_loc = np.array([car_phys.location.x, car_phys.location.y, car_phys.location.z])
+            car_vel = np.array([car_phys.velocity.x, car_phys.velocity.y, car_phys.velocity.z])
+            
+            same_side = (car_loc[1] > 0 and our_car_pos[1] > 0) or (car_loc[1] < 0 and our_car_pos[1] < 0)
+            if not same_side:
+                continue
+            
+            if car_loc[2] > self.config_max_car_height * 1.5:
+                continue
+
+            relative_ball_loc_z = ball_loc[2] - car_loc[2]
+            if not (self.config_min_ball_height_above_car < relative_ball_loc_z < self.config_max_ball_height_above_car):
+                continue
+
+            horizontal_offset_sq = (ball_loc[0] - car_loc[0])**2 + (ball_loc[1] - car_loc[1])**2
+            if horizontal_offset_sq >= 150**2:
+                continue
+            
+            relative_speed = np.linalg.norm(ball_vel - car_vel)
+            if relative_speed >= 350:
+                continue
+            
+            car_forward = np.array([math.cos(player.physics.rotation.yaw), math.sin(player.physics.rotation.yaw), 0])
+            car_to_ball = ball_loc - car_loc
+            car_to_ball_normalized = car_to_ball / np.linalg.norm(car_to_ball) if np.linalg.norm(car_to_ball) > 0.001 else np.array([0, 0, 0])
+            facing_ball = np.dot(car_forward, car_to_ball_normalized) > 0.4
+            
+            if not facing_ball:
+                continue
+                
+            self.logger(f"[{self.Name()}] {self.BLUE}{self.BOLD}Opponent dribble detected on same side.{self.RESET} Our Y: {our_car_pos[1]:.0f}, Enemy Y: {car_loc[1]:.0f}")    
+            return True
+        return False
+
+    def _is_our_car_dribbling(self, packet, local_player_index: int) -> bool:
+        if not hasattr(packet, 'game_ball') or not hasattr(packet.game_ball, 'physics') or local_player_index >= packet.num_cars:
+            return False
+            
+        our_player = packet.game_cars[local_player_index]
+        if our_player.is_demolished:
+            return False
+            
+        if not our_player.has_wheel_contact and our_player.physics.location.z > self.config_max_car_height * 1.5:
+            return False
+            
+        ball_phys = packet.game_ball.physics
+        ball_loc = np.array([ball_phys.location.x, ball_phys.location.y, ball_phys.location.z])
+        ball_vel = np.array([ball_phys.velocity.x, ball_phys.velocity.y, ball_phys.velocity.z])
+        
+        car_phys = our_player.physics
+        car_loc = np.array([car_phys.location.x, car_phys.location.y, car_phys.location.z])
+        car_vel = np.array([car_phys.velocity.x, car_phys.velocity.y, car_phys.velocity.z])
+        
+        same_side = (car_loc[1] > 0 and ball_loc[1] > 0) or (car_loc[1] < 0 and ball_loc[1] < 0)
+        if not same_side:
+            return False
+            
+        if car_loc[2] > self.config_max_car_height * 1.5:
+            return False
+            
+        relative_ball_loc_z = ball_loc[2] - car_loc[2]
+        if not (self.config_min_ball_height_above_car * 0.8 < relative_ball_loc_z < self.config_max_ball_height_above_car * 1.1):
+            return False
+            
+        horizontal_offset_sq = (ball_loc[0] - car_loc[0])**2 + (ball_loc[1] - car_loc[1])**2
+        max_horizontal_offset = self.config_max_horizontal_offset * 1.1
+        if horizontal_offset_sq >= max_horizontal_offset**2:
+            return False
+            
+        relative_speed = np.linalg.norm(ball_vel - car_vel)
+        max_speed = self.config_max_relative_speed_for_dribble * 1.1
+        if relative_speed >= max_speed:
+            return False
+            
+        car_forward = np.array([math.cos(car_phys.rotation.yaw), math.sin(car_phys.rotation.yaw), 0])
+        car_to_ball = ball_loc - car_loc
+        car_to_ball_normalized = car_to_ball / np.linalg.norm(car_to_ball) if np.linalg.norm(car_to_ball) > 0.001 else np.array([0, 0, 0])
+        facing_ball = np.dot(car_forward, car_to_ball_normalized) > 0.3
+        
+        if not facing_ball:
+            return False
+            
+        return True
+
+    def _is_teammate_dribbling(self, packet, local_player_index, local_player_team):
+        if not hasattr(packet, 'game_ball') or not hasattr(packet.game_ball, 'physics'):
+            return False
+            
+        if local_player_index >= packet.num_cars:
+            return False
+            
+        our_car = packet.game_cars[local_player_index]
+        our_car_pos = np.array([our_car.physics.location.x, our_car.physics.location.y, our_car.physics.location.z])
+
+        ball_phys = packet.game_ball.physics
+        ball_loc = np.array([ball_phys.location.x, ball_phys.location.y, ball_phys.location.z])
+        ball_vel = np.array([ball_phys.velocity.x, ball_phys.velocity.y, ball_phys.velocity.z])
+        
+        we_same_side_as_ball = (our_car_pos[1] > 0 and ball_loc[1] > 0) or (our_car_pos[1] < 0 and ball_loc[1] < 0)
+        if not we_same_side_as_ball:
+            return False
+
+        for i in range(packet.num_cars):
+            if i == local_player_index or packet.game_cars[i].team != local_player_team:
+                continue
+                
+            player = packet.game_cars[i]
+            if player.is_demolished:
+                continue
+
+            if not player.has_wheel_contact and player.physics.location.z > self.config_max_car_height * 1.5:
+                continue
+
+            car_phys = player.physics
+            car_loc = np.array([car_phys.location.x, car_phys.location.y, car_phys.location.z])
+            car_vel = np.array([car_phys.velocity.x, car_phys.velocity.y, car_phys.velocity.z])
+
+            teammate_same_side_as_ball = (car_loc[1] > 0 and ball_loc[1] > 0) or (car_loc[1] < 0 and ball_loc[1] < 0)
+            if not teammate_same_side_as_ball:
+                continue
+                
+            teammate_same_side_as_us = (car_loc[1] > 0 and our_car_pos[1] > 0) or (car_loc[1] < 0 and our_car_pos[1] < 0)
+            if not teammate_same_side_as_us:
+                continue
+
+            if car_loc[2] > self.config_max_car_height * 1.5:
+                continue
+
+            relative_ball_loc_z = ball_loc[2] - car_loc[2]
+            if not (self.config_min_ball_height_above_car * 0.8 < relative_ball_loc_z < self.config_max_ball_height_above_car * 1.1):
+                continue
+
+            horizontal_offset_sq = (ball_loc[0] - car_loc[0])**2 + (ball_loc[1] - car_loc[1])**2
+            if horizontal_offset_sq >= 150**2:
+                continue
+            
+            relative_speed = np.linalg.norm(ball_vel - car_vel)
+            if relative_speed >= 350:
+                continue
+            
+            car_forward = np.array([math.cos(car_phys.rotation.yaw), math.sin(car_phys.rotation.yaw), 0])
+            car_to_ball = ball_loc - car_loc
+            car_to_ball_normalized = car_to_ball / np.linalg.norm(car_to_ball) if np.linalg.norm(car_to_ball) > 0.001 else np.array([0, 0, 0])
+            facing_ball = np.dot(car_forward, car_to_ball_normalized) > 0.4
+            
+            if not facing_ball:
+                continue
+            
+            return True
+        return False
+
+    def _check_challenge_situation(self, packet, local_player_index, local_player_team):
+        if not hasattr(packet, 'game_ball') or not hasattr(packet.game_ball, 'physics'):
+            return False
+            
+        if local_player_index >= packet.num_cars:
+            return False
+            
+        if self._is_kickoff(packet):
+            return False
+            
+        our_car = packet.game_cars[local_player_index]
+        our_car_pos = np.array([our_car.physics.location.x, our_car.physics.location.y, our_car.physics.location.z])
+        our_car_vel = np.array([our_car.physics.velocity.x, our_car.physics.velocity.y, our_car.physics.velocity.z])
+        our_car_forward = np.array([
+            math.cos(our_car.physics.rotation.yaw), 
+            math.sin(our_car.physics.rotation.yaw), 
+            0
+        ])
+        
+        ball_phys = packet.game_ball.physics
+        ball_pos = np.array([ball_phys.location.x, ball_phys.location.y, ball_phys.location.z])
+        ball_vel = np.array([ball_phys.velocity.x, ball_phys.velocity.y, ball_phys.velocity.z])
+        
+        BALL_HEIGHT_THRESHOLD = 120.0
+        if ball_pos[2] > BALL_HEIGHT_THRESHOLD:
+            return False
+        
+        predicted_ball_pos = ball_pos + ball_vel * self.challenge_prediction_time
+        
+        if ball_pos[2] > 200 and predicted_ball_pos[2] > 160:
+            return False
+            
+        distance_to_ball = np.linalg.norm(our_car_pos - ball_pos)
+        
+        if distance_to_ball > 500:
+            return False
+        
+        predicted_our_pos = our_car_pos + our_car_vel * self.challenge_prediction_time
+        predicted_distance = np.linalg.norm(predicted_our_pos - predicted_ball_pos)
+        
+        car_to_ball_dir = (ball_pos - our_car_pos)
+        car_to_ball_dir_normalized = car_to_ball_dir / np.linalg.norm(car_to_ball_dir) if np.linalg.norm(car_to_ball_dir) > 0.001 else np.array([0, 0, 0])
+        
+        moving_toward_ball = np.dot(our_car_vel, car_to_ball_dir_normalized) > 500
+        
+        facing_ball = np.dot(our_car_forward, car_to_ball_dir_normalized) > 0.85
+        
+        if not (moving_toward_ball and facing_ball):
+            return False
+        
+        closest_opp_distance = float('inf')
+        closest_opp_predicted_distance = float('inf')
+        closest_opp_speed_toward_ball = 0
+        closest_opp_facing_ball = False
+        opponent_challenging = False
+        closest_opp_pos = None
+        
+        for i in range(packet.num_cars):
+            if packet.game_cars[i].team != local_player_team:
+                opp_car = packet.game_cars[i]
+                if opp_car.is_demolished:
+                    continue
+                    
+                opp_pos = np.array([opp_car.physics.location.x, opp_car.physics.location.y, opp_car.physics.location.z])
+                opp_vel = np.array([opp_car.physics.velocity.x, opp_car.physics.velocity.y, opp_car.physics.velocity.z])
+                
+                opp_distance_to_ball = np.linalg.norm(opp_pos - ball_pos)
+                
+                if opp_distance_to_ball > 300:
+                    continue
+                
+                predicted_opp_pos = opp_pos + opp_vel * self.challenge_prediction_time
+                predicted_opp_distance = np.linalg.norm(predicted_opp_pos - predicted_ball_pos)
+                
+                if opp_distance_to_ball < closest_opp_distance:
+                    closest_opp_distance = opp_distance_to_ball
+                    closest_opp_pos = opp_pos
+                    
+                    opp_to_ball_dir = (ball_pos - opp_pos)
+                    opp_to_ball_dir_norm = opp_to_ball_dir / np.linalg.norm(opp_to_ball_dir) if np.linalg.norm(opp_to_ball_dir) > 0.001 else np.array([0, 0, 0])
+                    closest_opp_speed_toward_ball = np.dot(opp_vel, opp_to_ball_dir_norm)
+                    
+                    opp_forward = np.array([
+                        math.cos(opp_car.physics.rotation.yaw),
+                        math.sin(opp_car.physics.rotation.yaw),
+                        0
+                    ])
+                    closest_opp_facing_ball = np.dot(opp_forward, opp_to_ball_dir_norm) > 0.7
+                    
+                if predicted_opp_distance < closest_opp_predicted_distance:
+                    closest_opp_predicted_distance = predicted_opp_distance
+                
+                if opp_distance_to_ball < 200:
+                    opp_to_ball_dir = (ball_pos - opp_pos)
+                    opp_to_ball_dir_norm = opp_to_ball_dir / np.linalg.norm(opp_to_ball_dir) if np.linalg.norm(opp_to_ball_dir) > 0.001 else np.array([0, 0, 0])
+                    opp_speed_toward_ball = np.dot(opp_vel, opp_to_ball_dir_norm)
+                
+                    opp_forward = np.array([
+                        math.cos(opp_car.physics.rotation.yaw),
+                        math.sin(opp_car.physics.rotation.yaw),
+                        0
+                    ])
+                    opp_facing_ball = np.dot(opp_forward, opp_to_ball_dir_norm) > 0.7
+                
+                    if opp_distance_to_ball < 200 or (opp_distance_to_ball < 250 and opp_speed_toward_ball > 500 and opp_facing_ball):
+                        opponent_challenging = True
+                        break
+        
+        if closest_opp_distance > 300:
+            return False
+            
+        is_opponent_between_us_and_ball = False
+        if closest_opp_pos is not None:
+            if closest_opp_distance < distance_to_ball * 0.7:
+                our_to_ball_dir = car_to_ball_dir_normalized
+                our_to_opp = closest_opp_pos - our_car_pos
+                our_to_opp_dist = np.linalg.norm(our_to_opp)
+                if our_to_opp_dist > 0.001:
+                    our_to_opp_dir = our_to_opp / our_to_opp_dist
+                    dot_product = np.dot(our_to_ball_dir, our_to_opp_dir)
+                    if dot_product > 0.8 and our_to_opp_dist < distance_to_ball:
+                        is_opponent_between_us_and_ball = True
+        
+        if is_opponent_between_us_and_ball:
+            return False
+            
+        both_very_close = distance_to_ball < 200 and closest_opp_distance < 200
+        
+        converging_paths = (moving_toward_ball and 
+                          closest_opp_speed_toward_ball > 500 and 
+                          closest_opp_facing_ball and
+                          closest_opp_distance < 300)
+        
+        balanced_distances = abs(distance_to_ball - closest_opp_distance) < 150
+        
+        collision_course = (distance_to_ball < 250 and
+                           closest_opp_distance < 250 and
+                           np.linalg.norm(our_car_pos - predicted_ball_pos) < 200 and
+                           np.linalg.norm(predicted_our_pos - predicted_ball_pos) < 200)
+        
+        defensive_challenge = False
+        if (local_player_team == 0 and ball_pos[1] < -3000) or (local_player_team == 1 and ball_pos[1] > 3000):
+            goal_y = -5120 if local_player_team == 0 else 5120
+            distance_to_goal_line = abs(ball_pos[1] - goal_y)
+            
+            if distance_to_goal_line < 2000:
+                defensive_challenge = (distance_to_ball < 400 and
+                                     closest_opp_distance < 400 and
+                                     moving_toward_ball)
+        
+        is_challenge_situation = (both_very_close or 
+                                (converging_paths and balanced_distances) or 
+                                collision_course or 
+                                defensive_challenge)
+        
+        if is_challenge_situation:
+            if distance_to_ball < 500 and closest_opp_distance < 500:
+                self.logger(f"[{self.Name()}] {self.BLUE}{self.BOLD}Challenge detected:{self.RESET} BallDist={distance_to_ball:.0f}, OppDist={closest_opp_distance:.0f}, OppSpeed={closest_opp_speed_toward_ball:.0f}, MySpeed={np.dot(our_car_vel, car_to_ball_dir_normalized):.0f}")
+        
+        return is_challenge_situation
+
+    def _check_enemy_possession_challenge(self, packet, local_player_index, local_player_team):
+        if not hasattr(packet, 'game_ball') or not hasattr(packet.game_ball, 'physics'):
+            return False
+            
+        our_car = packet.game_cars[local_player_index]
+        our_car_pos = np.array([our_car.physics.location.x, our_car.physics.location.y, our_car.physics.location.z])
+        our_car_vel = np.array([our_car.physics.velocity.x, our_car.physics.velocity.y, our_car.physics.velocity.z])
+        our_car_forward = np.array([
+            math.cos(our_car.physics.rotation.yaw), 
+            math.sin(our_car.physics.rotation.yaw), 
+            0
+        ])
+        
+        ball_phys = packet.game_ball.physics
+        ball_pos = np.array([ball_phys.location.x, ball_phys.location.y, ball_phys.location.z])
+        
+        BALL_HEIGHT_THRESHOLD = 120.0
+        if ball_pos[2] > BALL_HEIGHT_THRESHOLD:
+            return False
+        
+        opponent_with_ball = None
+        opponent_pos = None
+        closest_opponent_dist_to_ball = float('inf')
+        
+        for i in range(packet.num_cars):
+            if packet.game_cars[i].team != local_player_team:
+                car = packet.game_cars[i]
+                if car.is_demolished:
+                    continue
+                    
+                car_pos = np.array([car.physics.location.x, car.physics.location.y, car.physics.location.z])
+                dist_to_ball = np.linalg.norm(car_pos - ball_pos)
+                
+                if dist_to_ball < 200 and dist_to_ball < closest_opponent_dist_to_ball:
+                    closest_opponent_dist_to_ball = dist_to_ball
+                    opponent_with_ball = car
+                    opponent_pos = car_pos
+        
+        if opponent_with_ball is None:
+            return False
+            
+        dist_to_ball = np.linalg.norm(our_car_pos - ball_pos)
+        
+        if dist_to_ball > 400:
+            return False
+            
+        dist_to_opponent = np.linalg.norm(our_car_pos - opponent_pos)
+        
+        if dist_to_opponent > 400:
+            return False
+            
+        car_to_ball_dir = (ball_pos - our_car_pos)
+        car_to_ball_dir_normalized = car_to_ball_dir / np.linalg.norm(car_to_ball_dir) if np.linalg.norm(car_to_ball_dir) > 0.001 else np.array([0, 0, 0])
+        speed_toward_ball = np.dot(our_car_vel, car_to_ball_dir_normalized)
+        
+        if speed_toward_ball < 600:
+            return False
+            
+        facing_ball = np.dot(our_car_forward, car_to_ball_dir_normalized) > 0.85
+        if not facing_ball:
+            return False
+            
+        balanced_distances = abs(dist_to_ball - closest_opponent_dist_to_ball) < 150
+        if not balanced_distances:
+            return False
+        
+        self.logger(f"[{self.Name()}] {self.BLUE}{self.BOLD}Enemy possession challenge:{self.RESET} BallDist={dist_to_ball:.0f}, OppDist={closest_opponent_dist_to_ball:.0f}, Speed={speed_toward_ball:.0f}")
+        return True
+
+    def _are_on_same_side(self, car1_pos, car2_pos):
+        return (car1_pos[1] > 0 and car2_pos[1] > 0) or (car1_pos[1] < 0 and car2_pos[1] < 0)
+
+    def _check_dribble_conditions(self, packet, local_player_index, local_player_team):
+        current_time = packet.game_info.seconds_elapsed
+        
+        if self._is_kickoff(packet):
+            return False, ""
+            
+        if local_player_index >= packet.num_cars:
+            return False, ""
+            
+        our_car = packet.game_cars[local_player_index]
+        our_car_pos = np.array([our_car.physics.location.x, our_car.physics.location.y, our_car.physics.location.z])
+        
+        if not hasattr(packet, 'game_ball') or not hasattr(packet.game_ball, 'physics'):
+            return False, ""
+            
+        ball_pos = np.array([
+            packet.game_ball.physics.location.x,
+            packet.game_ball.physics.location.y, 
+            packet.game_ball.physics.location.z
+        ])
+            
+        opponent_has_ball_now = self._is_opponent_dribbling(packet, local_player_team)
+        we_have_ball_now = self._is_our_car_dribbling(packet, local_player_index)
+        teammate_has_ball_now = self._is_teammate_dribbling(packet, local_player_index, local_player_team)
+        
+        same_side_as_ball = self._are_on_same_side(our_car_pos, ball_pos)
+        
+        offensive_teammate_possession = False
+        if same_side_as_ball:
+            offensive_teammate_possession = self._check_offensive_teammate_possession(packet, local_player_index, local_player_team)
+        
+        recovery_situation = self._check_recovery_situation(packet, local_player_index, local_player_team)
+        
+        challenge_situation = False
+        if same_side_as_ball:
+            challenge_situation = self._check_challenge_situation(packet, local_player_index, local_player_team)
+        
+        opponent_confirmed_dribbling = False
+        if opponent_has_ball_now:
+            if not self.opponent_was_dribbling:
+                self.opponent_dribble_start_time = current_time
+                self.opponent_was_dribbling = True
+            
+            time_with_ball = current_time - self.opponent_dribble_start_time
+            opponent_confirmed_dribbling = time_with_ball >= self.dribble_confirmation_time
+        else:
+            if self.opponent_was_dribbling:
+                self.opponent_was_dribbling = False
+        
+        our_confirmed_dribbling = False
+        if we_have_ball_now:
+            if not self.we_were_dribbling:
+                self.our_dribble_start_time = current_time
+                self.we_were_dribbling = True
+            
+            time_with_ball = current_time - self.our_dribble_start_time
+            our_confirmed_dribbling = time_with_ball >= self.dribble_confirmation_time
+        else:
+            if self.we_were_dribbling:
+                self.we_were_dribbling = False
+                
+        teammate_confirmed_dribbling = False
+        if teammate_has_ball_now:
+            if not self.teammate_was_dribbling:
+                self.teammate_dribble_start_time = current_time
+                self.teammate_was_dribbling = True
+            
+            time_with_ball = current_time - self.teammate_dribble_start_time
+            teammate_confirmed_dribbling = time_with_ball >= self.dribble_confirmation_time
+        else:
+            if self.teammate_was_dribbling:
+                self.teammate_was_dribbling = False
+        
+        should_activate = our_confirmed_dribbling
+        if our_confirmed_dribbling:
+            activation_reason = "we are dribbling"
+        else:
+            activation_reason = ""
+
+        return should_activate, activation_reason
+
+    def _check_offensive_teammate_possession(self, packet, local_player_index, local_player_team):
+        if not hasattr(packet, 'game_ball') or not hasattr(packet.game_ball, 'physics'):
+            return False
+            
+        ball_phys = packet.game_ball.physics
+        ball_loc = np.array([ball_phys.location.x, ball_phys.location.y, ball_phys.location.z])
+        
+        is_ball_on_enemy_side = (local_player_team == 0 and ball_loc[1] > 200) or \
+                               (local_player_team == 1 and ball_loc[1] < -200)
+                               
+        if not is_ball_on_enemy_side:
+            return False
+            
+        if local_player_index >= packet.num_cars:
+            return False
+            
+        our_car = packet.game_cars[local_player_index]
+        our_car_loc = np.array([our_car.physics.location.x, our_car.physics.location.y, our_car.physics.location.z])
+        
+        we_on_enemy_side = (local_player_team == 0 and our_car_loc[1] > 0) or \
+                          (local_player_team == 1 and our_car_loc[1] < 0)
+                          
+        if not we_on_enemy_side:
+            return False
+            
+        distance_to_ball = np.linalg.norm(our_car_loc - ball_loc)
+        if distance_to_ball < 300:
+            return False
+            
+        teammate_with_possession = False
+        teammate_pos = None
+        
+        for i in range(packet.num_cars):
+            if i == local_player_index or packet.game_cars[i].team != local_player_team:
+                continue
+                
+            teammate = packet.game_cars[i]
+            if teammate.is_demolished:
+                continue
+                
+            teammate_loc = np.array([teammate.physics.location.x, teammate.physics.location.y, teammate.physics.location.z])
+            
+            teammate_on_enemy_side = (local_player_team == 0 and teammate_loc[1] > 0) or \
+                                    (local_player_team == 1 and teammate_loc[1] < 0)
+                                    
+            if not teammate_on_enemy_side:
+                continue
+                
+            teammate_distance_to_ball = np.linalg.norm(teammate_loc - ball_loc)
+            if teammate_distance_to_ball < 200:
+                teammate_with_possession = True
+                teammate_pos = teammate_loc
+                break
+                
+        if not teammate_with_possession:
+            return False
+            
+        nearby_enemies = 0
+        NEARBY_THRESHOLD = 1500
+        
+        for i in range(packet.num_cars):
+            car = packet.game_cars[i]
+            if car.team == local_player_team:
+                continue
+                
+            if car.is_demolished:
+                continue
+                
+            enemy_loc = np.array([car.physics.location.x, car.physics.location.y, car.physics.location.z])
+            
+            distance_to_play = min(
+                np.linalg.norm(enemy_loc - ball_loc),
+                np.linalg.norm(enemy_loc - teammate_pos) if teammate_pos is not None else float('inf')
+            )
+            
+            if distance_to_play < NEARBY_THRESHOLD:
+                nearby_enemies += 1
+        
+        return nearby_enemies > 1
+
+    def _check_recovery_situation(self, packet, local_player_index, local_player_team):
+        if not hasattr(packet, 'game_ball') or not hasattr(packet.game_ball, 'physics'):
+            return False
+            
+        ball_phys = packet.game_ball.physics
+        ball_loc = np.array([ball_phys.location.x, ball_phys.location.y, ball_phys.location.z])
+        
+        is_ball_on_our_side = (local_player_team == 0 and ball_loc[1] < -200) or \
+                             (local_player_team == 1 and ball_loc[1] > 200)
+                               
+        if not is_ball_on_our_side:
+            return False
+            
+        if local_player_index >= packet.num_cars:
+            return False
+            
+        our_car = packet.game_cars[local_player_index]
+        our_car_loc = np.array([our_car.physics.location.x, our_car.physics.location.y, our_car.physics.location.z])
+        
+        we_on_enemy_side = (local_player_team == 0 and our_car_loc[1] > 0) or \
+                          (local_player_team == 1 and our_car_loc[1] < 0)
+                          
+        if not we_on_enemy_side:
+            return False
+            
+        enemy_on_our_side = False
+        for i in range(packet.num_cars):
+            car = packet.game_cars[i]
+            if car.team != local_player_team:
+                car_loc = np.array([car.physics.location.x, car.physics.location.y, car.physics.location.z])
+                if (local_player_team == 0 and car_loc[1] < 0) or \
+                   (local_player_team == 1 and car_loc[1] > 0):
+                    enemy_on_our_side = True
+                    break
+                    
+        return enemy_on_our_side
+
+    def _is_kickoff(self, packet):
+        if hasattr(packet.game_info, 'is_kickoff_pause') and packet.game_info.is_kickoff_pause:
+            return True
+            
+        if hasattr(packet, 'game_ball') and hasattr(packet.game_ball, 'physics'):
+            ball_phys = packet.game_ball.physics
+            
+            at_center = (abs(ball_phys.location.x) < 10 and abs(ball_phys.location.y) < 10)
+            
+            low_velocity = (abs(ball_phys.velocity.x) < 10 and 
+                           abs(ball_phys.velocity.y) < 10 and
+                           abs(ball_phys.velocity.z) < 10)
+            
+            is_round_active = hasattr(packet.game_info, 'is_round_active') and packet.game_info.is_round_active
+            
+            return at_center and low_velocity and is_round_active
+            
+        return False
+
+    def _is_near_wall(self, car_pos, car_rotation=None):
+        field_width, field_length, field_height = 8192, 10240, 2044
+        
+        base_wall_threshold = 200
+        wall_threshold = base_wall_threshold
+        if car_rotation is not None:
+            facing_wall = False
+            if abs(car_pos[0]) > field_width - base_wall_threshold:
+                facing_wall = (car_pos[0] > 0 and abs(car_rotation) < math.pi/2) or \
+                             (car_pos[0] < 0 and abs(car_rotation) > math.pi/2)
+            elif abs(car_pos[1]) > field_length - base_wall_threshold:
+                facing_wall = (car_pos[1] > 0 and car_rotation > 0) or \
+                             (car_pos[1] < 0 and car_rotation < 0)
+            
+            if facing_wall:
+                wall_threshold *= 0.7
+            else:
+                wall_threshold *= 1.3
+        
+        near_side_wall = abs(car_pos[0]) > field_width - wall_threshold
+        near_back_wall = abs(car_pos[1]) > field_length - wall_threshold
+        
+        wall_type = None
+        if near_side_wall and near_back_wall:
+            dist_to_side = field_width - abs(car_pos[0])
+            dist_to_back = field_length - abs(car_pos[1])
+            wall_type = 'side' if dist_to_side < dist_to_back else 'back'
+        elif near_side_wall:
+            wall_type = 'side'
+        elif near_back_wall:
+            wall_type = 'back'
+        
+        if wall_type:
+            self.logger(f"[{self.Name()}] Near {wall_type} wall: pos=({car_pos[0]:.0f}, {car_pos[1]:.0f}), threshold={wall_threshold:.0f}")
+        
+        return (near_side_wall or near_back_wall), wall_type
+    def game_tick_packet_set(self, packet, local_player_index, playername, field_info=None):
+        if field_info is not None:
+            self.live_field_info = field_info
+
+        if local_player_index < 0 or local_player_index >= packet.num_cars:
+            if self.nexto_agent_active: 
+                self.logger(f"[{self.Name()}] Invalid local_player_index: {local_player_index}. Disabling Nexto if active.")
+                self.nexto_agent_active = False
+            return None
+
+        our_player_data = packet.game_cars[local_player_index]
+        local_player_team = our_player_data.team
+        
+        if self.current_player_index != local_player_index or self.current_player_team != local_player_team:
+            self.current_player_index = local_player_index
+            self.current_player_team = local_player_team
+            if self.nexto_instance and self._nexto_initialized_for_player_key != (local_player_index, local_player_team):
+                self._nexto_initialized_for_player_key = None 
+
+        # 🔥 NEXTO ACTIF PAR DÉFAUT - TOUJOURS INITIALISÉ 🔥
+        if not self.nexto_agent_active and not self._should_use_spark(packet, local_player_index, local_player_team):
+            if self._initialize_nexto_if_needed(packet, local_player_index, local_player_team):
+                self.nexto_agent_active = True
+                self.logger(f"[{self.Name()}] {self.GREEN}{self.BOLD}NEXTO ACTIVÉ PAR DÉFAUT{self.RESET}")
+
+        # 🚗 SPARK UNIQUEMENT DANS LES ZONES SPÉCIFIQUES 🚗
+        if self._should_use_spark(packet, local_player_index, local_player_team):
+            if self.nexto_agent_active:
+                self.logger(f"[{self.Name()}] {self.RED}{self.BOLD}SPARK ACTIVÉ:{self.RESET} Zone spéciale détectée")
+            self.nexto_agent_active = False
+            return None
+        else:
+            # 🎯 EN DEHORS DES ZONES, NEXTO DOIT ÊTRE ACTIF 🎯
+            if not self.nexto_agent_active:
+                if self._initialize_nexto_if_needed(packet, local_player_index, local_player_team):
+                    self.nexto_agent_active = True
+                    self.logger(f"[{self.Name()}] {self.GREEN}{self.BOLD}NEXTO REACTIVÉ{self.RESET}")
+
+        # 🏎️ GESTION AÉRIENNE - ON GARDE NEXTO SI DÉJÀ ACTIF 🏎️
+        if not our_player_data.has_wheel_contact and self.nexto_agent_active:
+            return self.nexto_instance.get_output(packet) if self.nexto_instance else None
+
+        # 🎮 RETOURNE LE CONTRÔLE NEXTO SI ACTIF 🎮
+        if self.nexto_agent_active and self.nexto_instance:
+            if not self._initialize_nexto_if_needed(packet, local_player_index, local_player_team):
+                self.nexto_agent_active = False
+                return None
+
+            self.nexto_instance.index = local_player_index
+            self.nexto_instance.team = local_player_team
+            
+            if hasattr(self.nexto_instance, 'team_sign'):
+                self.nexto_instance.team_sign = 1 if local_player_team == 0 else -1
+
+            try:
+                controller_state_nexto = self.nexto_instance.get_output(packet)
+                is_empty = False
+                if controller_state_nexto is None:
+                    is_empty = True
+                elif isinstance(controller_state_nexto, SimpleControllerState):
+                    is_empty = (
+                        controller_state_nexto.throttle == 0 and
+                        controller_state_nexto.steer == 0 and
+                        controller_state_nexto.pitch == 0 and
+                        controller_state_nexto.yaw == 0 and
+                        controller_state_nexto.roll == 0 and
+                        not controller_state_nexto.jump and
+                        not controller_state_nexto.boost and
+                        not controller_state_nexto.handbrake and
+                        not getattr(controller_state_nexto, 'use_item', False)
+                    )
+                if is_empty:
+                    self.logger(f"[{self.Name()}] {self.RED}{self.BOLD}Nexto returned empty controller state, falling back to Opti/default logic!{self.RESET}")
+                    return None
+                return controller_state_nexto
+            except Exception as e:
+                self.logger(f"[{self.Name()}] Error getting output from Nexto: {e}")
+                self.logger(traceback.format_exc())
+                self.nexto_agent_active = False 
+                return None
+        
+        return None
